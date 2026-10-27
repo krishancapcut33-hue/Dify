@@ -20,7 +20,7 @@ from core.db.session_factory import get_session_maker
 from core.ops.base_trace_instance import bind_application_tracing_hooks
 from core.schemas.schema_manager import SchemaManager
 from core.tools.tool_file_manager import ToolFileManager
-from core.tools.tool_manager import ToolManager
+from core.tools.tool_manager import ToolManager as LegacyToolManager
 from enums import DeploymentEdition, WebAppAccessMode
 from extensions.application_services.account import AccountServices, build_account_services
 from extensions.application_services.agent import AgentAppServices, build_agent_app_services
@@ -39,6 +39,7 @@ from extensions.application_services.knowledge import (
 )
 from extensions.application_services.rbac import RBACServices, build_rbac_services
 from extensions.application_services.resource_access_token import build_resource_access_token_service
+from extensions.application_services.tools import ToolServices, build_tool_services
 from extensions.application_services.trial_app import TrialAppServices, build_trial_app_services
 from extensions.application_services.workflow import build_workflow_execution_dependencies, build_workflow_suggestions
 from extensions.application_services.workflow_variables import (
@@ -215,6 +216,7 @@ from services.step_by_step_tour_service import StepByStepTourService
 from services.system_feature_service import SystemFeatureService
 from services.tag_application_service import TagApplicationService
 from services.tool_file_download_service import ToolFileDownloadService
+from services.tools.tool_manager import ToolManager
 from services.tracing.runtime_bridge import RuntimeApplicationTracingHooks
 from services.upload_file_delivery_service import UploadFileDeliveryService
 from services.web_app_runtime_query_service import WebAppRuntimeQueryService
@@ -294,6 +296,7 @@ class AppScopedEndUserServices:
 
 @dataclass(frozen=True, slots=True)
 class ApplicationServices:
+    tools: ToolServices
     workflow_runtime: AppGenerationRuntime
     workflow_variables: WorkflowVariableService
     console_workflow_variables: ConsoleWorkflowVariableService
@@ -593,6 +596,7 @@ def build_application_services(
     )
 
     return ApplicationServices(
+        tools=build_tool_services(database_client),
         workflow_runtime=build_workflow_execution_dependencies(database_client),
         workflow_variables=workflow_variables,
         console_workflow_variables=build_console_workflow_variables(
@@ -863,6 +867,8 @@ def init_app(app: Flask) -> None:
 
     app.extensions["knowledge_fs_node_dependencies"] = build_knowledge_fs_node_dependencies
     ToolManager.register_hardcoded_provider_class(KnowledgeFSProvider)
+    # Legacy workflow execution and saved trace extras still resolve providers here.
+    LegacyToolManager.register_hardcoded_provider_class(KnowledgeFSProvider)
     services = build_application_services(
         database_client=get_session_maker(),
         deployment_edition=dify_config.DEPLOYMENT_EDITION,
