@@ -1179,13 +1179,13 @@ def test_run_uses_single_node_execution_branch(
         graph=json.dumps({"nodes": [], "edges": []}),
     )
     workflow.environment_variables = []
-    snapshot = workflow_snapshot(workflow)
+    workflow_definition = workflow_snapshot(workflow)
 
     runner = WorkflowAppRunner(
         application_generate_entity=app_generate_entity,
         queue_manager=queue_manager,
         variable_loader=MagicMock(),
-        workflow=snapshot,
+        workflow=workflow_definition,
         system_user_id="system-user",
         runtime=workflow_runtime,
     )
@@ -1216,7 +1216,7 @@ def test_run_uses_single_node_execution_branch(
         runner.prepare()
 
     prepare_single.assert_called_once_with(
-        workflow=snapshot,
+        workflow=workflow_definition,
         single_iteration_run=single_iteration_run,
         single_loop_run=single_loop_run,
         user_id="user",
@@ -1332,13 +1332,13 @@ def test_run_adds_inputs_with_snippet_compatible_start_aliases(
         kind=WorkflowKind.SNIPPET,
     )
     workflow.environment_variables = []
-    snapshot = workflow_snapshot(workflow)
+    workflow_definition = workflow_snapshot(workflow)
 
     runner = WorkflowAppRunner(
         application_generate_entity=app_generate_entity,
         queue_manager=queue_manager,
         variable_loader=MagicMock(),
-        workflow=snapshot,
+        workflow=workflow_definition,
         system_user_id="system-user",
         runtime=workflow_runtime,
     )
