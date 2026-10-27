@@ -4,7 +4,6 @@ from typing import TypedDict
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
-from werkzeug.exceptions import NotFound
 
 from extensions.ext_redis import redis_client
 from libs.login import current_account_with_tenant
@@ -12,6 +11,7 @@ from libs.pagination import paginate_query
 from models.account import Account
 from models.model import App, AppAnnotationHitHistory, AppAnnotationSetting, MessageAnnotation
 from repositories.annotation_reply_job_repository import RedisAnnotationReplyJobRepository
+from services.annotation.errors import AnnotationResourceNotFoundError
 from services.app_ref_service import AnnotationRef
 from tasks.annotation.add_annotation_to_index_task import add_annotation_to_index_task
 from tasks.annotation.delete_annotation_index_task import delete_annotation_index_task
@@ -125,7 +125,7 @@ class AppAnnotationService:
         )
 
         if not app:
-            raise NotFound("App not found")
+            raise AnnotationResourceNotFoundError("App not found")
         if keyword:
             from libs.helper import escape_like_pattern
 
@@ -161,7 +161,7 @@ class AppAnnotationService:
         )
 
         if not app:
-            raise NotFound("App not found")
+            raise AnnotationResourceNotFoundError("App not found")
 
         question = args.get("question")
         if question is None:
@@ -196,7 +196,7 @@ class AppAnnotationService:
         annotation = cls._get_annotation_by_ref(annotation_ref, session)
 
         if not annotation:
-            raise NotFound("Annotation not found")
+            raise AnnotationResourceNotFoundError("Annotation not found")
 
         question = args.get("question")
         if question is None:
@@ -231,7 +231,7 @@ class AppAnnotationService:
         annotation = cls._get_annotation_by_ref(annotation_ref, session)
 
         if not annotation:
-            raise NotFound("Annotation not found")
+            raise AnnotationResourceNotFoundError("Annotation not found")
 
         session.delete(annotation)
 
@@ -261,11 +261,7 @@ class AppAnnotationService:
 
     @classmethod
     def get_annotation_by_id(cls, annotation_id: str, session: Session) -> MessageAnnotation | None:
-        annotation = session.get(MessageAnnotation, annotation_id)
-
-        if not annotation:
-            return None
-        return annotation
+        return session.get(MessageAnnotation, annotation_id)
 
     @classmethod
     def get_annotation_reply_by_id(
@@ -293,23 +289,22 @@ class AppAnnotationService:
         score: float,
         session: Session,
     ) -> None:
-        # add hit count to annotation
         session.execute(
             update(MessageAnnotation)
             .where(MessageAnnotation.id == annotation_id)
             .values(hit_count=MessageAnnotation.hit_count + 1)
         )
-
-        annotation_hit_history = AppAnnotationHitHistory(
-            annotation_id=annotation_id,
-            app_id=app_id,
-            account_id=user_id,
-            question=query,
-            source=from_source,
-            score=score,
-            message_id=message_id,
-            annotation_question=annotation_question,
-            annotation_content=annotation_content,
+        session.add(
+            AppAnnotationHitHistory(
+                annotation_id=annotation_id,
+                app_id=app_id,
+                account_id=user_id,
+                question=query,
+                source=from_source,
+                score=score,
+                message_id=message_id,
+                annotation_question=annotation_question,
+                annotation_content=annotation_content,
+            )
         )
-        session.add(annotation_hit_history)
         session.flush()

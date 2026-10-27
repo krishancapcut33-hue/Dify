@@ -16,7 +16,6 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from core.app.app_config.entities import WorkflowUIBasedAppConfig
-from core.app.apps.workflow.app_generator import WorkflowAppGenerator
 from core.app.entities.app_invoke_entities import AdvancedChatAppGenerateEntity, InvokeFrom, WorkflowAppGenerateEntity
 from core.app.layers.pause_state_persist_layer import (
     WorkflowResumptionContext,
@@ -36,6 +35,8 @@ from repositories.sqlalchemy_api_workflow_run_repository import (
     WorkflowRunNotPausedError,
     _WorkflowRunError,
 )
+from services.workflow.execution.adapters.workflow.app_generator import WorkflowAppGenerator
+from services.workflow.variable_contracts import WorkflowExecutionVariables
 from tasks import async_workflow_tasks
 from tasks.app_generate import workflow_execute_task as workflow_execute_task_module
 from tasks.app_generate.workflow_execute_task import (
@@ -81,6 +82,29 @@ def _build_workflow_generate_entity(stream: bool) -> WorkflowAppGenerateEntity:
 
 def _single_event_generator(payload):
     yield payload
+
+
+@pytest.mark.parametrize("app_mode", [AppMode.WORKFLOW, AppMode.ADVANCED_CHAT])
+def test_worker_passes_its_binding_resolver_to_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session_factory: sessionmaker[Session],
+    workflow_variables: WorkflowExecutionVariables,
+    app_mode: AppMode,
+) -> None:
+    app = _make_app()
+    app.mode = app_mode
+    workflow, user = _make_workflow(), _make_account()
+    params = AppExecutionParams.new(app, workflow, user, {}, InvokeFrom.DEBUGGER)
+    runner = _AppRunner(sqlite_session_factory, params, variables=workflow_variables)
+    generator = MagicMock()
+    monkeypatch.setattr(
+        workflow_execute_task_module,
+        "WorkflowAppGenerator" if app_mode == AppMode.WORKFLOW else "AdvancedChatAppGenerator",
+        generator,
+    )
+    runner._run_app(app=app, workflow=workflow, user=user, pause_state_config=MagicMock())
+    assert generator.call_args.kwargs["runtime"] is runner._runtime
+    assert runner._runtime.agent_bindings._sessions is sqlite_session_factory
 
 
 def _decode_published_payload(payload: bytes) -> dict[str, object] | str:
@@ -362,13 +386,13 @@ def test_get_error_message(event: str | Mapping[str, object] | BaseModel, expect
 def mock_topic(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     topic = MagicMock()
     monkeypatch.setattr(
-        "tasks.app_generate.workflow_execute_task.MessageBasedAppGenerator.get_response_topic",
+        "tasks.app_generate.workflow_execute_task.WorkflowEventStream.get_response_topic",
         lambda *_args, **_kwargs: topic,
     )
     return topic
 
 
-def test_publish_streaming_response_with_uuid(mock_topic: MagicMock):
+def test_publish_streaming_response_with_uuid(mock_topic: MagicMock, sqlite_session_factory: sessionmaker[Session]):
     workflow_run_id = uuid.uuid4()
     response_stream = iter(
         [
@@ -384,13 +408,19 @@ def test_publish_streaming_response_with_uuid(mock_topic: MagicMock):
         workflow_id="workflow-id",
         inputs={},
         started_reason=WorkflowStartReason.INITIAL,
+        agent_snapshot=False,
+        sessions=sqlite_session_factory,
+        tenant_id="tenant-id",
+        app_id="app-id",
     )
 
     payloads = _published_payloads(mock_topic)
     assert [payload["event"] for payload in payloads] == ["workflow_started", "workflow_finished"]
 
 
-def test_publish_streaming_response_coerces_string_uuid(mock_topic: MagicMock):
+def test_publish_streaming_response_coerces_string_uuid(
+    mock_topic: MagicMock, sqlite_session_factory: sessionmaker[Session]
+):
     workflow_run_id = uuid.uuid4()
     response_stream = iter([{"event": "workflow_paused", "task_id": "task-id"}])
 
@@ -401,6 +431,10 @@ def test_publish_streaming_response_coerces_string_uuid(mock_topic: MagicMock):
         workflow_id="workflow-id",
         inputs={},
         started_reason=WorkflowStartReason.INITIAL,
+        agent_snapshot=False,
+        sessions=sqlite_session_factory,
+        tenant_id="tenant-id",
+        app_id="app-id",
     )
 
     payloads = _published_payloads(mock_topic)
@@ -408,7 +442,7 @@ def test_publish_streaming_response_coerces_string_uuid(mock_topic: MagicMock):
 
 
 def test_publish_streaming_response_publishes_started_then_failed_terminal_when_iteration_raises(
-    mock_topic: MagicMock,
+    mock_topic: MagicMock, sqlite_session_factory: sessionmaker[Session]
 ):
     def _response_stream():
         if False:
@@ -423,6 +457,10 @@ def test_publish_streaming_response_publishes_started_then_failed_terminal_when_
             workflow_id="workflow-id",
             inputs={"foo": "bar"},
             started_reason=WorkflowStartReason.INITIAL,
+            agent_snapshot=False,
+            sessions=sqlite_session_factory,
+            tenant_id="tenant-id",
+            app_id="app-id",
         )
 
     payloads = _published_payloads(mock_topic)
@@ -434,8 +472,7 @@ def test_publish_streaming_response_publishes_started_then_failed_terminal_when_
 
 
 def test_publish_streaming_response_recovers_when_workflow_started_publish_fails_first(
-    mock_topic: MagicMock,
-    caplog: pytest.LogCaptureFixture,
+    mock_topic: MagicMock, caplog: pytest.LogCaptureFixture, sqlite_session_factory: sessionmaker[Session]
 ):
     caplog.set_level(logging.ERROR, logger="tasks.app_generate.workflow_execute_task")
     response_stream = iter([{"event": "workflow_started", "task_id": "task-id"}])
@@ -462,6 +499,10 @@ def test_publish_streaming_response_recovers_when_workflow_started_publish_fails
             workflow_id="workflow-id",
             inputs={"file": object()},
             started_reason=WorkflowStartReason.INITIAL,
+            agent_snapshot=False,
+            sessions=sqlite_session_factory,
+            tenant_id="tenant-id",
+            app_id="app-id",
         )
 
     assert [payload["event"] for payload in successful_payloads] == ["workflow_started", "workflow_finished"]
@@ -475,8 +516,7 @@ def test_publish_streaming_response_recovers_when_workflow_started_publish_fails
 
 
 def test_publish_streaming_response_publishes_failed_terminal_without_duplicate_started_on_publish_error(
-    mock_topic: MagicMock,
-    caplog: pytest.LogCaptureFixture,
+    mock_topic: MagicMock, caplog: pytest.LogCaptureFixture, sqlite_session_factory: sessionmaker[Session]
 ):
     caplog.set_level(logging.ERROR, logger="tasks.app_generate.workflow_execute_task")
     response_stream = iter(
@@ -508,6 +548,10 @@ def test_publish_streaming_response_publishes_failed_terminal_without_duplicate_
             workflow_id="workflow-id",
             inputs={},
             started_reason=WorkflowStartReason.INITIAL,
+            agent_snapshot=False,
+            sessions=sqlite_session_factory,
+            tenant_id="tenant-id",
+            app_id="app-id",
         )
 
     assert [payload["event"] for payload in successful_payloads] == ["workflow_started", "workflow_finished"]
@@ -519,8 +563,7 @@ def test_publish_streaming_response_publishes_failed_terminal_without_duplicate_
 
 
 def test_publish_streaming_response_recovers_when_workflow_finished_publish_fails_first(
-    mock_topic: MagicMock,
-    caplog: pytest.LogCaptureFixture,
+    mock_topic: MagicMock, caplog: pytest.LogCaptureFixture, sqlite_session_factory: sessionmaker[Session]
 ):
     caplog.set_level(logging.ERROR, logger="tasks.app_generate.workflow_execute_task")
     response_stream = iter(
@@ -552,19 +595,21 @@ def test_publish_streaming_response_recovers_when_workflow_finished_publish_fail
             workflow_id="workflow-id",
             inputs={},
             started_reason=WorkflowStartReason.INITIAL,
+            agent_snapshot=False,
+            sessions=sqlite_session_factory,
+            tenant_id="tenant-id",
+            app_id="app-id",
         )
 
     assert [payload["event"] for payload in successful_payloads] == ["workflow_started", "workflow_finished"]
     assert successful_payloads[1]["task_id"] == "task-id"
-    assert successful_payloads[1]["data"]["status"] == WorkflowExecutionStatus.FAILED
-    assert successful_payloads[1]["data"]["error"] == "finished publish failed"
+    assert successful_payloads[1]["data"]["status"] == WorkflowExecutionStatus.SUCCEEDED
     assert "workflow-run-id" in caplog.text
-    assert "publishing fallback terminal event" in caplog.text
+    assert "Retrying engine terminal event publication" in caplog.text
 
 
 def test_publish_streaming_response_publishes_failed_terminal_on_exhaustion_without_terminal_event(
-    mock_topic: MagicMock,
-    caplog: pytest.LogCaptureFixture,
+    mock_topic: MagicMock, caplog: pytest.LogCaptureFixture, sqlite_session_factory: sessionmaker[Session]
 ):
     caplog.set_level(logging.WARNING, logger="tasks.app_generate.workflow_execute_task")
     response_stream = iter(
@@ -585,6 +630,10 @@ def test_publish_streaming_response_publishes_failed_terminal_on_exhaustion_with
         workflow_id="workflow-id",
         inputs={},
         started_reason=WorkflowStartReason.INITIAL,
+        agent_snapshot=False,
+        sessions=sqlite_session_factory,
+        tenant_id="tenant-id",
+        app_id="app-id",
     )
 
     payloads = _published_payloads(mock_topic)
@@ -596,7 +645,9 @@ def test_publish_streaming_response_publishes_failed_terminal_on_exhaustion_with
     assert "ended without a terminal event" in caplog.text
 
 
-def test_publish_streaming_response_uses_error_message_for_failed_terminal(mock_topic: MagicMock):
+def test_publish_streaming_response_uses_error_message_for_failed_terminal(
+    mock_topic: MagicMock, sqlite_session_factory: sessionmaker[Session]
+):
     def response_stream() -> Generator[str | Mapping[str, object] | BaseModel]:
         yield {
             "event": "error",
@@ -613,6 +664,10 @@ def test_publish_streaming_response_uses_error_message_for_failed_terminal(mock_
         workflow_id="workflow-id",
         inputs={},
         started_reason=WorkflowStartReason.INITIAL,
+        agent_snapshot=False,
+        sessions=sqlite_session_factory,
+        tenant_id="tenant-id",
+        app_id="app-id",
     )
 
     payloads = _published_payloads(mock_topic)
@@ -628,7 +683,9 @@ def test_publish_streaming_response_uses_error_message_for_failed_terminal(mock_
     assert finished_data["error"] == "LLM provider and model are required."
 
 
-def test_publish_streaming_response_does_not_publish_synthetic_failure_after_terminal_event(mock_topic: MagicMock):
+def test_publish_streaming_response_does_not_publish_synthetic_failure_after_terminal_event(
+    mock_topic: MagicMock, sqlite_session_factory: sessionmaker[Session]
+):
     response_stream = iter(
         [
             {
@@ -667,6 +724,10 @@ def test_publish_streaming_response_does_not_publish_synthetic_failure_after_ter
         workflow_id="workflow-id",
         inputs={},
         started_reason=WorkflowStartReason.INITIAL,
+        agent_snapshot=False,
+        sessions=sqlite_session_factory,
+        tenant_id="tenant-id",
+        app_id="app-id",
     )
 
     payloads = _published_payloads(mock_topic)
@@ -677,6 +738,8 @@ def test_app_runner_streaming_failure_publishes_started_then_failed_workflow_fin
     mock_topic: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
     sqlite_session_factory: sessionmaker[Session],
+    *,
+    workflow_variables: WorkflowExecutionVariables,
 ):
     exec_params = AppExecutionParams(
         app_id="app-id",
@@ -690,7 +753,7 @@ def test_app_runner_streaming_failure_publishes_started_then_failed_workflow_fin
         workflow_run_id="workflow-run-id",
     )
     _persist_app_and_workflow(sqlite_session_factory)
-    runner = _AppRunner(session_factory=sqlite_session_factory, exec_params=exec_params)
+    runner = _AppRunner(session_factory=sqlite_session_factory, exec_params=exec_params, variables=workflow_variables)
 
     monkeypatch.setattr(runner, "_resolve_user", _make_account)
     monkeypatch.setattr(runner, "_setup_flask_context", lambda _user: nullcontext())
@@ -726,7 +789,7 @@ def test_app_runner_streaming_failure_publishes_started_then_failed_workflow_fin
 
 
 def test_app_runner_resolves_account_without_switching_tenant(
-    sqlite_session_factory: sessionmaker[Session],
+    sqlite_session_factory: sessionmaker[Session], *, workflow_variables: WorkflowExecutionVariables
 ):
     account_id = str(uuid.uuid4())
     exec_params = AppExecutionParams(
@@ -745,7 +808,7 @@ def test_app_runner_resolves_account_without_switching_tenant(
         account.id = account_id
         session.add(account)
         session.commit()
-    runner = _AppRunner(session_factory=sqlite_session_factory, exec_params=exec_params)
+    runner = _AppRunner(session_factory=sqlite_session_factory, exec_params=exec_params, variables=workflow_variables)
 
     resolved_user = runner._resolve_user()
 
@@ -771,6 +834,8 @@ def test_app_runner_streaming_failure_keeps_existing_pre_runtime_helper_behavior
     mock_topic: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
     sqlite_session_factory: sessionmaker[Session],
+    *,
+    workflow_variables: WorkflowExecutionVariables,
 ):
     exec_params = AppExecutionParams(
         app_id="app-id",
@@ -784,13 +849,13 @@ def test_app_runner_streaming_failure_keeps_existing_pre_runtime_helper_behavior
         workflow_run_id="workflow-run-id",
     )
     _persist_app_and_workflow(sqlite_session_factory)
-    runner = _AppRunner(session_factory=sqlite_session_factory, exec_params=exec_params)
+    runner = _AppRunner(session_factory=sqlite_session_factory, exec_params=exec_params, variables=workflow_variables)
 
     monkeypatch.setattr(runner, "_resolve_user", _make_account)
     monkeypatch.setattr(runner, "_setup_flask_context", lambda _user: nullcontext())
     monkeypatch.setattr(runner, "_run_app", lambda **_kwargs: (_ for _ in ()).throw(ValueError("Invalid upload file")))
     monkeypatch.setattr(
-        "core.workflow.workflow_entry.WorkflowEntry.handle_special_values",
+        "services.workflow.execution.adapters.workflow_entry.WorkflowEntry.handle_special_values",
         lambda value: (_ for _ in ()).throw(AssertionError("pre-runtime helper should not normalize inputs")),
     )
 
@@ -805,6 +870,8 @@ def test_app_runner_streaming_failure_keeps_existing_pre_runtime_helper_behavior
 def test_app_runner_streaming_success_calls_publish_streaming_response_with_full_signature(
     monkeypatch: pytest.MonkeyPatch,
     sqlite_session_factory: sessionmaker[Session],
+    *,
+    workflow_variables: WorkflowExecutionVariables,
 ):
     exec_params = AppExecutionParams(
         app_id="app-id",
@@ -818,7 +885,7 @@ def test_app_runner_streaming_success_calls_publish_streaming_response_with_full
         workflow_run_id="workflow-run-id",
     )
     _persist_app_and_workflow(sqlite_session_factory)
-    runner = _AppRunner(session_factory=sqlite_session_factory, exec_params=exec_params)
+    runner = _AppRunner(session_factory=sqlite_session_factory, exec_params=exec_params, variables=workflow_variables)
     response_stream = _single_event_generator({"event": "message"})
     publish_streaming_response = MagicMock()
 
@@ -839,6 +906,12 @@ def test_app_runner_streaming_success_calls_publish_streaming_response_with_full
         exec_params.workflow_id,
         exec_params.args.get("inputs", {}),
         WorkflowStartReason.INITIAL,
+        sessions=sqlite_session_factory,
+        tenant_id=exec_params.tenant_id,
+        app_id="app-id",
+        agent_snapshot=False,
+        on_finalized=runner._mark_execution_finalized,
+        on_terminal=None,
     )
 
 
@@ -846,6 +919,7 @@ def test_resume_app_execution_queries_message_by_conversation_and_workflow_run(
     monkeypatch: pytest.MonkeyPatch,
     sqlite_engine: Engine,
     sqlite_session_factory: sessionmaker[Session],
+    workflow_variables: WorkflowExecutionVariables,
 ):
     workflow_run_id = "run-id"
     conversation_id = "conversation-id"
@@ -887,7 +961,7 @@ def test_resume_app_execution_queries_message_by_conversation_and_workflow_run(
     monkeypatch.setattr("tasks.app_generate.workflow_execute_task._resume_advanced_chat", resume_advanced_chat)
     monkeypatch.setattr("tasks.app_generate.workflow_execute_task._resume_workflow", MagicMock())
 
-    _resume_app_execution({"workflow_run_id": workflow_run_id})
+    _resume_app_execution({"workflow_run_id": workflow_run_id}, variables=workflow_variables)
 
     workflow_run_repo.resume_workflow_pause.assert_called_once_with(workflow_run_id, pause_entity, before_resume=ANY)
     resume_advanced_chat.assert_called_once()
@@ -899,6 +973,7 @@ def test_resume_app_execution_returns_early_when_advanced_chat_missing_conversat
     monkeypatch: pytest.MonkeyPatch,
     sqlite_engine: Engine,
     sqlite_session_factory: sessionmaker[Session],
+    workflow_variables: WorkflowExecutionVariables,
 ):
     workflow_run_id = "run-id"
     _persist_resumption_models(sqlite_session_factory, workflow_run_id=workflow_run_id)
@@ -934,7 +1009,7 @@ def test_resume_app_execution_returns_early_when_advanced_chat_missing_conversat
     resume_advanced_chat = MagicMock()
     monkeypatch.setattr("tasks.app_generate.workflow_execute_task._resume_advanced_chat", resume_advanced_chat)
 
-    _resume_app_execution({"workflow_run_id": workflow_run_id})
+    _resume_app_execution({"workflow_run_id": workflow_run_id}, variables=workflow_variables)
 
     workflow_run_repo.resume_workflow_pause.assert_not_called()
     resume_advanced_chat.assert_not_called()
@@ -944,6 +1019,7 @@ def test_resume_app_execution_clears_stale_cancellation_signals_before_resuming(
     monkeypatch: pytest.MonkeyPatch,
     sqlite_engine: Engine,
     sqlite_session_factory: sessionmaker[Session],
+    workflow_variables: WorkflowExecutionVariables,
 ):
     """A resumed run reuses the paused task ID, so it must not inherit its cancellation signals.
 
@@ -989,7 +1065,7 @@ def test_resume_app_execution_clears_stale_cancellation_signals_before_resuming(
     monkeypatch.setattr("tasks.app_generate.workflow_execute_task.clear_app_task_cancellation_signals", clear_signals)
     monkeypatch.setattr("tasks.app_generate.workflow_execute_task._resume_workflow", resume_workflow)
 
-    _resume_app_execution({"workflow_run_id": workflow_run_id})
+    _resume_app_execution({"workflow_run_id": workflow_run_id}, variables=workflow_variables)
 
     clear_signals.assert_called_once_with(generate_entity.task_id)
     # Clearing after the engine started would let it observe the stale abort first.
@@ -1000,6 +1076,7 @@ def test_resume_app_execution_keeps_cancellation_signals_when_resume_is_abandone
     monkeypatch: pytest.MonkeyPatch,
     sqlite_engine: Engine,
     sqlite_session_factory: sessionmaker[Session],
+    workflow_variables: WorkflowExecutionVariables,
 ):
     """No attempt is starting, so nothing may clear the signals guarding this task."""
     workflow_run_id = "run-id"
@@ -1038,7 +1115,7 @@ def test_resume_app_execution_keeps_cancellation_signals_when_resume_is_abandone
     monkeypatch.setattr("tasks.app_generate.workflow_execute_task.clear_app_task_cancellation_signals", clear_signals)
     monkeypatch.setattr("tasks.app_generate.workflow_execute_task._resume_advanced_chat", MagicMock())
 
-    _resume_app_execution({"workflow_run_id": workflow_run_id})
+    _resume_app_execution({"workflow_run_id": workflow_run_id}, variables=workflow_variables)
 
     clear_signals.assert_not_called()
 
@@ -1065,6 +1142,8 @@ def test_resume_recovers_legacy_task_before_claiming_pause(
     sqlite_session_factory: sessionmaker[Session],
     entry_point: str,
     scenario: str,
+    *,
+    workflow_variables: WorkflowExecutionVariables,
 ) -> None:
     workflow_run_id = str(uuid.uuid4())
     task_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -1174,8 +1253,10 @@ def test_resume_recovers_legacy_task_before_claiming_pause(
     if entry_point == "async" and scenario == "concurrent-stop":
         with pytest.raises(WorkflowRunNotPausedError):
             invoke({"workflow_run_id": workflow_run_id})
-    else:
+    elif entry_point == "async":
         invoke({"workflow_run_id": workflow_run_id})
+    else:
+        invoke({"workflow_run_id": workflow_run_id}, variables=workflow_variables)
 
     with sqlite_session_factory() as session:
         persisted = session.get(WorkflowRun, workflow_run_id)
@@ -1203,8 +1284,9 @@ def test_resume_recovers_legacy_task_before_claiming_pause(
 
 def test_resume_advanced_chat_publishes_events_for_originally_blocking_runs(
     monkeypatch: pytest.MonkeyPatch,
-    sqlite_session: Session,
     sqlite_session_factory: sessionmaker[Session],
+    *,
+    workflow_variables: WorkflowExecutionVariables,
 ):
     generate_entity = _build_advanced_chat_generate_entity(conversation_id="conversation-id")
     generate_entity.stream = False
@@ -1215,7 +1297,7 @@ def test_resume_advanced_chat_publishes_events_for_originally_blocking_runs(
     generator_instance.resume.return_value = response_stream
     monkeypatch.setattr(
         "tasks.app_generate.workflow_execute_task.AdvancedChatAppGenerator",
-        lambda *, execution_driver: generator_instance,
+        lambda *, execution_driver, **_dependencies: generator_instance,
     )
 
     publish_streaming_response = MagicMock()
@@ -1243,12 +1325,12 @@ def test_resume_advanced_chat_publishes_events_for_originally_blocking_runs(
         pause_state_config=MagicMock(),
         workflow_run_id="workflow-run-id",
         workflow_run=_make_workflow_run(),
-        session=sqlite_session,
+        variables=workflow_variables,
     )
 
     resumed_entity = generator_instance.resume.call_args.kwargs["application_generate_entity"]
     assert resumed_entity.stream is True
-    assert generator_instance.resume.call_args.kwargs["session"] is sqlite_session
+    assert "session" not in generator_instance.resume.call_args.kwargs
     publish_streaming_response.assert_called_once_with(
         response_stream,
         "workflow-run-id",
@@ -1256,12 +1338,18 @@ def test_resume_advanced_chat_publishes_events_for_originally_blocking_runs(
         workflow.id,
         generate_entity.inputs,
         WorkflowStartReason.RESUMPTION,
+        sessions=sqlite_session_factory,
+        tenant_id=workflow.tenant_id,
+        app_id=workflow.app_id,
+        agent_snapshot=False,
     )
 
 
 def test_resume_workflow_publishes_events_for_originally_blocking_runs(
     monkeypatch: pytest.MonkeyPatch,
     sqlite_session_factory: sessionmaker[Session],
+    *,
+    workflow_variables: WorkflowExecutionVariables,
 ):
     generate_entity = _build_workflow_generate_entity(stream=False)
     workflow = _make_workflow()
@@ -1271,7 +1359,7 @@ def test_resume_workflow_publishes_events_for_originally_blocking_runs(
     generator_instance.resume.return_value = response_stream
     monkeypatch.setattr(
         "tasks.app_generate.workflow_execute_task.WorkflowAppGenerator",
-        lambda *, execution_driver: generator_instance,
+        lambda *, execution_driver, **_dependencies: generator_instance,
     )
 
     publish_streaming_response = MagicMock()
@@ -1302,6 +1390,7 @@ def test_resume_workflow_publishes_events_for_originally_blocking_runs(
         workflow_run=_make_workflow_run(),
         workflow_run_repo=workflow_run_repo,
         pause_entity=pause_entity,
+        variables=workflow_variables,
     )
 
     resumed_entity = generator_instance.resume.call_args.kwargs["application_generate_entity"]
@@ -1313,6 +1402,11 @@ def test_resume_workflow_publishes_events_for_originally_blocking_runs(
         workflow.id,
         generate_entity.inputs,
         WorkflowStartReason.RESUMPTION,
+        sessions=sqlite_session_factory,
+        tenant_id=workflow.tenant_id,
+        app_id=workflow.app_id,
+        agent_snapshot=False,
+        on_terminal=None,
     )
     workflow_run_repo.delete_workflow_pause.assert_called_once_with(pause_entity)
 
@@ -1320,6 +1414,8 @@ def test_resume_workflow_publishes_events_for_originally_blocking_runs(
 def test_resume_workflow_ignores_missing_old_pause_after_repause(
     monkeypatch: pytest.MonkeyPatch,
     sqlite_session_factory: sessionmaker[Session],
+    *,
+    workflow_variables: WorkflowExecutionVariables,
 ):
     generate_entity = _build_workflow_generate_entity(stream=False)
     workflow = _make_workflow()
@@ -1329,7 +1425,7 @@ def test_resume_workflow_ignores_missing_old_pause_after_repause(
     generator_instance.resume.return_value = response_stream
     monkeypatch.setattr(
         "tasks.app_generate.workflow_execute_task.WorkflowAppGenerator",
-        lambda *, execution_driver: generator_instance,
+        lambda *, execution_driver, **_dependencies: generator_instance,
     )
 
     publish_streaming_response = MagicMock()
@@ -1361,6 +1457,7 @@ def test_resume_workflow_ignores_missing_old_pause_after_repause(
         workflow_run=_make_workflow_run(),
         workflow_run_repo=workflow_run_repo,
         pause_entity=pause_entity,
+        variables=workflow_variables,
     )
 
     publish_streaming_response.assert_called_once_with(
@@ -1370,5 +1467,10 @@ def test_resume_workflow_ignores_missing_old_pause_after_repause(
         workflow.id,
         generate_entity.inputs,
         WorkflowStartReason.RESUMPTION,
+        sessions=sqlite_session_factory,
+        tenant_id=workflow.tenant_id,
+        app_id=workflow.app_id,
+        agent_snapshot=False,
+        on_terminal=None,
     )
     workflow_run_repo.delete_workflow_pause.assert_called_once_with(pause_entity)

@@ -20,6 +20,8 @@ from services.errors.conversation import ConversationCompletedError, Conversatio
 from services.errors.llm import InvokeRateLimitError
 from services.installed_app_generation_adapters import AppGenerateServiceRuntime
 from services.installed_app_generation_service import GenerationResponse, InstalledAppGenerationService
+from services.workflow.execution.ports import WorkflowRuntime
+from services.workflow.variable_contracts import WorkflowExecutionVariables
 from tests.unit_tests.controllers.console.explore.test_installed_app_admission import (
     _assert_json_response,
     _Harness,
@@ -423,6 +425,9 @@ class TestInstalledAppCompletionCases:
         sqlite_session_factory: sessionmaker[Session],
         monkeypatch: pytest.MonkeyPatch,
         deleted_resource: str,
+        *,
+        workflow_variables: WorkflowExecutionVariables,
+        workflow_runtime: WorkflowRuntime,
     ) -> None:
         def delete_resource() -> None:
             with sqlite_session_factory.begin() as session:
@@ -438,7 +443,11 @@ class TestInstalledAppCompletionCases:
             installed_apps=_InstalledAppCompletionInstalledappservices(
                 generation=InstalledAppGenerationService(
                     usage=SQLAlchemyInstalledAppRepository(session_factory=sqlite_session_factory),
-                    runtime=AppGenerateServiceRuntime(session_factory=sqlite_session_factory),
+                    runtime=AppGenerateServiceRuntime(
+                        session_factory=sqlite_session_factory,
+                        variables=workflow_variables,
+                        runtime=workflow_runtime,
+                    ),
                 )
             )
         )
@@ -805,6 +814,9 @@ class TestCompletionCases:
         sqlite_session_factory: sessionmaker[Session],
         monkeypatch: pytest.MonkeyPatch,
         rejection: str,
+        *,
+        workflow_variables: WorkflowExecutionVariables,
+        workflow_runtime: WorkflowRuntime,
     ) -> None:
         conversation_id = str(uuid4())
         with sqlite_session_factory.begin() as session:
@@ -827,7 +839,11 @@ class TestCompletionCases:
             installed_apps=_CompletionInstalledAppServices(
                 generation=InstalledAppGenerationService(
                     usage=SQLAlchemyInstalledAppRepository(session_factory=sqlite_session_factory),
-                    runtime=AppGenerateServiceRuntime(session_factory=sqlite_session_factory),
+                    runtime=AppGenerateServiceRuntime(
+                        session_factory=sqlite_session_factory,
+                        variables=workflow_variables,
+                        runtime=workflow_runtime,
+                    ),
                 )
             )
         )
