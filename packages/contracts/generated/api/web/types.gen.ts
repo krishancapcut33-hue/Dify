@@ -130,6 +130,21 @@ export type ChatMessagePayload = {
   retriever_from?: string
 }
 
+export type ClaimablePassportResponse = {
+  app_code: string
+  app_name: string
+  connection_count: number
+  index: number
+}
+
+export type ClaimablePassportsPayload = {
+  passports: Array<string>
+}
+
+export type ClaimablePassportsResponse = {
+  data: Array<ClaimablePassportResponse>
+}
+
 export type CompletionMessagePayload = {
   files?: Array<{
     [key: string]: unknown
@@ -145,6 +160,55 @@ export type CompletionMessagePayload = {
 export type CompletionRequestError = ErrorResponse & {
   code: 'completion_request_error'
   status: 400
+}
+
+export type ConnectionClaimErrorResponse = {
+  code:
+    | 'app_not_found'
+    | 'connection_claim_unavailable'
+    | 'connection_conflict'
+    | 'end_user_login_required'
+    | 'unauthorized'
+    | 'web_app_access_denied'
+  message: string
+  status: number
+}
+
+export type ConnectionClaimFailureResponse = {
+  error: ConnectionClaimErrorResponse
+  index: number
+  status: 'failed'
+}
+
+export type ConnectionClaimPayload = {
+  passports: Array<string>
+}
+
+export type ConnectionClaimPreflightDetails = {
+  failures: Array<ConnectionClaimFailureResponse>
+}
+
+export type ConnectionClaimPreflightFailedError = ErrorResponse & {
+  code: 'connection_claim_preflight_failed'
+  details?: ConnectionClaimPreflightDetails
+  status: 400
+}
+
+export type ConnectionClaimResponse = {
+  data: Array<ConnectionClaimSuccessResponse | ConnectionClaimFailureResponse>
+}
+
+export type ConnectionClaimSuccessResponse = {
+  access_token: string
+  app_code: string
+  claimed_connections: number
+  index: number
+  status: 'success'
+}
+
+export type ConnectionClaimUnavailableError = ErrorResponse & {
+  code: 'connection_claim_unavailable'
+  status: 503
 }
 
 export type ConnectionConfigurationInvalidError = ErrorResponse & {
@@ -1733,6 +1797,50 @@ export type PostConnectionsResponses = {
 }
 
 export type PostConnectionsResponse = PostConnectionsResponses[keyof PostConnectionsResponses]
+
+export type PostConnectionsClaimData = {
+  body: ConnectionClaimPayload
+  path?: never
+  query?: never
+  url: '/connections/claim'
+}
+
+export type PostConnectionsClaimErrors = {
+  400: ConnectionClaimPreflightFailedError | ErrorResponse
+  401: EndUserLoginRequiredError | ErrorResponse
+  503: ConnectionClaimUnavailableError | ErrorResponse
+  default: ErrorResponse
+}
+
+export type PostConnectionsClaimError = PostConnectionsClaimErrors[keyof PostConnectionsClaimErrors]
+
+export type PostConnectionsClaimResponses = {
+  200: ConnectionClaimResponse
+}
+
+export type PostConnectionsClaimResponse =
+  PostConnectionsClaimResponses[keyof PostConnectionsClaimResponses]
+
+export type PostConnectionsClaimablePassportsData = {
+  body: ClaimablePassportsPayload
+  path?: never
+  query?: never
+  url: '/connections/claimable-passports'
+}
+
+export type PostConnectionsClaimablePassportsErrors = {
+  default: ErrorResponse
+}
+
+export type PostConnectionsClaimablePassportsError =
+  PostConnectionsClaimablePassportsErrors[keyof PostConnectionsClaimablePassportsErrors]
+
+export type PostConnectionsClaimablePassportsResponses = {
+  200: ClaimablePassportsResponse
+}
+
+export type PostConnectionsClaimablePassportsResponse =
+  PostConnectionsClaimablePassportsResponses[keyof PostConnectionsClaimablePassportsResponses]
 
 export type GetConnectionsConfigurationData = {
   body?: never
