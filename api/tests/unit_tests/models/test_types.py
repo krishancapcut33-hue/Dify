@@ -18,7 +18,17 @@ class NotPydanticModel:
     pass
 
 
-def test_json_model_column_serializes_supported_input_shapes() -> None:
+def test_json_model_column_is_deprecated():
+    message = (
+        "JSONModelColumn is a legacy coercing TEXT-backed type. "
+        "Use FrozenPydanticModelColumn for new model-only persistence."
+    )
+
+    with pytest.warns(DeprecationWarning, match=message):
+        JSONModelColumn(JsonColumnSample)
+
+
+def test_json_model_column_serializes_supported_input_shapes():
     column = JSONModelColumn(JsonColumnSample)
     dialect = sqlite.dialect()
 
