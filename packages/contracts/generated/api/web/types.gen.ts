@@ -1018,6 +1018,7 @@ export type SavedMessageListQuery = {
 }
 
 export type SelectInputConfig = {
+  default_value?: string
   option_source: StringListSource
   output_variable_name: string
   type?: 'select'
