@@ -878,7 +878,9 @@ class TestHumanInputRepositoryCases:
         }
 
     @staticmethod
-    def test_create_runtime_form_allows_conversation_without_workflow(repository_session: Session) -> None:
+    def test_create_runtime_form_requires_workflow_even_when_conversation_is_present(
+        repository_session: Session,
+    ) -> None:
         repo = HumanInputFormRepositoryImpl(
             tenant_id="tenant",
             app_id="app",
@@ -900,16 +902,13 @@ class TestHumanInputRepositoryCases:
             display_in_ui=True,
             resolved_default_values={},
         )
-        entity = repo.create_form(params)
-
-        repository_session.expire_all()
-        persisted = repository_session.get(HumanInputForm, entity.id)
-        assert persisted is not None
-        assert persisted.workflow_run_id is None
-        assert persisted.conversation_id == "conversation"
+        with pytest.raises(ValueError, match="a runtime human input form requires a workflow_execution_id"):
+            repo.create_form(params)
 
     @staticmethod
-    def test_create_runtime_form_requires_workflow_or_conversation(repository_session: Session) -> None:
+    def test_create_runtime_form_requires_workflow_when_conversation_is_missing(
+        repository_session: Session,
+    ) -> None:
         repo = HumanInputFormRepositoryImpl(
             tenant_id="tenant",
             app_id="app",
@@ -931,7 +930,7 @@ class TestHumanInputRepositoryCases:
             display_in_ui=True,
             resolved_default_values={},
         )
-        with pytest.raises(ValueError, match="requires a workflow_execution_id or conversation_id"):
+        with pytest.raises(ValueError, match="a runtime human input form requires a workflow_execution_id"):
             repo.create_form(params)
 
     @staticmethod
