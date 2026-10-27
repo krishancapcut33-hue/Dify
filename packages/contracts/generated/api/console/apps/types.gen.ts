@@ -3042,18 +3042,14 @@ export type AgentToolCallResponse = {
         [key: string]: string
       }
     | null
-  tool_input: {
-    [key: string]: unknown
-  }
+  tool_input: unknown
   tool_label:
     | string
     | {
         [key: string]: string
       }
   tool_name: string
-  tool_output: {
-    [key: string]: unknown
-  }
+  tool_output: unknown
   tool_parameters: {
     [key: string]: unknown
   }
@@ -5615,7 +5611,6 @@ export type GetAppsByAppIdAgentLogsData = {
 
 export type GetAppsByAppIdAgentLogsErrors = {
   400: ErrorResponse
-  404: AppNotFoundError | ErrorResponse
   default: ErrorResponse
 }
 
