@@ -296,7 +296,6 @@ class TestDatasetServiceRetrieval:
                 tenant_id="tenant-1",
                 user=user,
                 accessible_dataset_ids=[accessible.id],
-                include_own_datasets=True,
             )
 
         assert total == 2
@@ -337,7 +336,6 @@ class TestDatasetServiceRetrieval:
             "tenant-1",
             user=user,
             accessible_dataset_ids=[accessible.id, "not-requested"],
-            include_own_datasets=True,
             session=sqlite_session,
         )
 
