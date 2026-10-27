@@ -54,7 +54,9 @@ from repositories.api_workflow_node_execution_repository import WorkflowNodeExec
 from repositories.entities.workflow_pause import WorkflowPauseEntity
 from repositories.factory import DifyAPIRepositoryFactory
 from services.app_task_service import AppTaskService
+from services.tools.provider_queries import ToolProviderIcons
 from services.workflow.execution.adapters.response_stream import WorkflowEventStream
+from services.workflow.node_execution_extras import node_execution_extras
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,7 @@ def build_workflow_event_stream(
     tenant_id: str,
     app_id: str,
     session_maker: sessionmaker[Session],
+    tool_providers: ToolProviderIcons,
     human_input_surface: HumanInputSurface | None = None,
     idle_timeout: float = 300,
     ping_interval: float = 10.0,
@@ -198,6 +201,7 @@ def build_workflow_event_stream(
                     session_maker=session_maker,
                     human_input_surface=human_input_surface,
                     node_executions=node_executions,
+                    tool_providers=tool_providers,
                 )
 
                 for event in snapshot_events:
@@ -342,6 +346,7 @@ def _build_snapshot_events(
     session_maker: sessionmaker[Session] | None = None,
     human_input_surface: HumanInputSurface | None = None,
     node_executions: Mapping[str, WorkflowNodeExecutionModel],
+    tool_providers: ToolProviderIcons,
 ) -> list[Mapping[str, Any]]:
     events: list[Mapping[str, Any]] = []
     variable_pool = _load_variable_pool_from_resumption_context(resumption_context)
@@ -365,6 +370,7 @@ def _build_snapshot_events(
             task_id=task_id,
             snapshot=snapshot,
             execution=execution,
+            tool_providers=tool_providers,
         )
         _apply_message_context(node_started, message_context)
         events.append(node_started)
@@ -449,6 +455,7 @@ def _build_node_started_event(
     task_id: str,
     snapshot: WorkflowNodeExecutionSnapshot,
     execution: WorkflowNodeExecutionModel | None,
+    tool_providers: ToolProviderIcons,
 ) -> dict[str, Any]:
     created_at = int(snapshot.created_at.timestamp()) if snapshot.created_at else 0
     response = NodeStartStreamResponse(
@@ -464,7 +471,7 @@ def _build_node_started_event(
             inputs=execution.inputs_dict if execution else None,
             inputs_truncated=execution.inputs_truncated if execution else False,
             created_at=created_at,
-            extras=execution.extras if execution else {},
+            extras=node_execution_extras(execution, tool_providers=tool_providers) if execution else {},
             iteration_id=snapshot.iteration_id,
             loop_id=snapshot.loop_id,
         ),

@@ -388,6 +388,12 @@ class TestHitlServiceApi:
         )
         msg_generator = Mock()
         snapshot_calls: list[dict[str, object]] = []
+        tool_providers = Mock()
+        monkeypatch.setattr(
+            workflow_events_module,
+            "application_services",
+            lambda: SimpleNamespace(tools=SimpleNamespace(tool_providers=tool_providers)),
+        )
 
         def snapshot_builder(**kwargs: object) -> list[dict[str, str]]:
             snapshot_calls.append(kwargs)
@@ -416,6 +422,7 @@ class TestHitlServiceApi:
                 "tenant_id": "tenant-1",
                 "app_id": "app-1",
                 "session_maker": ANY,
+                "tool_providers": tool_providers,
                 "human_input_surface": HumanInputSurface.SERVICE_API,
                 "close_on_pause": False,
             }
@@ -804,6 +811,7 @@ class TestHitlServiceApi:
             resumption_context=resumption_context,
             session_maker=sqlite_session_maker,
             node_executions={},
+            tool_providers=Mock(),
         )
 
         assert [event["event"] for event in events] == [
@@ -994,6 +1002,12 @@ class TestWorkflowEventsApi:
         )
         msg_generator = Mock()
         snapshot_calls: list[dict[str, object]] = []
+        tool_providers = Mock()
+        monkeypatch.setattr(
+            workflow_events_module,
+            "application_services",
+            lambda: SimpleNamespace(tools=SimpleNamespace(tool_providers=tool_providers)),
+        )
 
         def snapshot_builder(**kwargs: object) -> list[dict[str, str]]:
             snapshot_calls.append(kwargs)
