@@ -57,6 +57,7 @@ from controllers.console.app import (
 from controllers.console.app import (
     workflow_statistic as workflow_statistic_module,
 )
+from controllers.console.app import workflow_trigger as workflow_trigger_module
 from controllers.console.app import (
     wraps as wraps_module,
 )
@@ -78,6 +79,7 @@ from controllers.console.app.workflow_draft_variable import (
     WorkflowDraftVariableUpdatePayload,
 )
 from controllers.console.app.workflow_statistic import WorkflowStatisticQuery
+from controllers.console.app.workflow_trigger import ParserEnable, WebhookTriggerQuery
 from fields import app_fields
 from fields.app_model_config_response import AppModelConfigResponse
 from libs.login import AccountWithTenant
@@ -123,6 +125,7 @@ from services.entities.app_entities import (
     UpdateAppParams,
 )
 from services.entities.dsl_entities import Import, ImportStatus
+from services.trigger.app_trigger_store import WebhookTriggerRecord
 from tests.helpers.unit.config_override import apply_config_overrides
 
 """Unit coverage for console app controller contracts and response mapping."""
@@ -553,31 +556,31 @@ class TestAppApisCases:
         def test_workflow_variable_collection_get(self, database_app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
             api = workflow_draft_variable_module.WorkflowVariableCollectionApi()
             method = unwrap(api.get)
-
-            class DummyDraftService:
-                def __init__(self, session: Session):
-                    self.session = session
-
-                def list_variables_without_values(self, **_kwargs):
-                    assert self.session.get_bind() is db.engine
-                    return {"items": [], "total": 0}
-
-            class DummyWorkflowService:
-                def is_workflow_exist(self, *args, **kwargs):
-                    return True
-
-            monkeypatch.setattr(workflow_draft_variable_module, "WorkflowDraftVariableService", DummyDraftService)
-            monkeypatch.setattr(workflow_draft_variable_module, "WorkflowService", DummyWorkflowService)
+            workflow_variables = MagicMock()
+            empty_items: list[object] = []
+            workflow_variables.list_variables.return_value = {"items": empty_items, "total": 0}
+            monkeypatch.setattr(
+                workflow_draft_variable_module,
+                "application_services",
+                lambda: SimpleNamespace(console_workflow_variables=workflow_variables),
+            )
+            request_context = _make_request_context()
 
             with database_app.test_request_context("/?page=1&limit=20"):
                 result = method(
                     api,
                     WorkflowDraftVariableListQuery(page=1, limit=20),
-                    _make_account(),
-                    app_model=_make_app("app-1"),
+                    request_context,
+                    app_id=uuid.UUID(_APP_APIS_APP_ID),
                 )
 
             assert result == {"items": [], "total": 0}
+            workflow_variables.list_variables.assert_called_once()
+            args = workflow_variables.list_variables.call_args.args
+            assert args[0] == request_context
+            assert args[1].id == _APP_APIS_APP_ID
+            assert args[1].kind == "app"
+            assert workflow_variables.list_variables.call_args.kwargs == {"page": 1, "limit": 20}
 
         def test_environment_variable_update_payload_preserves_full_replace_default(self) -> None:
             payload = EnvironmentVariableUpdatePayload(environment_variables=[])
@@ -609,16 +612,13 @@ class TestAppApisCases:
         ) -> None:
             api = workflow_draft_variable_module.EnvironmentVariableCollectionApi()
             method = unwrap(api.post)
-            captured: dict = {}
-
-            class DummyWorkflowService:
-                def patch_draft_workflow_environment_variables(self, **kwargs) -> None:
-                    captured.update(kwargs)
-
-                def update_draft_workflow_environment_variables(self, **_kwargs) -> None:
-                    raise AssertionError("patch request must not use full replacement")
-
-            monkeypatch.setattr(workflow_draft_variable_module, "WorkflowService", DummyWorkflowService)
+            workflow_variables = MagicMock()
+            monkeypatch.setattr(
+                workflow_draft_variable_module,
+                "application_services",
+                lambda: SimpleNamespace(console_workflow_variables=workflow_variables),
+            )
+            request_context = _make_request_context()
 
             with database_app.test_request_context(
                 "/",
@@ -635,18 +635,17 @@ class TestAppApisCases:
                         patch=True,
                         deleted_environment_variable_ids=["env-b"],
                     ),
-                    _make_account(),
-                    app_model=_make_app(),
+                    request_context,
+                    app_id=uuid.UUID(_APP_APIS_APP_ID),
                 )
 
             assert result == {"result": "success"}
-            assert [(variable.id, variable.value) for variable in captured["environment_variables"]] == [
-                ("env-a", "new-a")
-            ]
-            assert captured["deleted_environment_variable_ids"] == ["env-b"]
-            assert captured["app_model"].id == _APP_APIS_APP_ID
-            assert captured["account"].id == USER_ID
-            assert captured["session"].get_bind() is db.engine
+            workflow_variables.update_environment.assert_called_once_with(
+                request_context,
+                _APP_APIS_APP_ID,
+                [{"id": "env-a", "name": "a", "value_type": "string", "value": "new-a"}],
+                deleted_ids=["env-b"],
+            )
 
     class TestWorkflowStatisticEndpoints:
         def test_workflow_statistic_time_range(self):
@@ -821,6 +820,51 @@ class TestAppApisCases:
                 "parse_time_range",
                 lambda *_args, **_kwargs: (None, None),
             )
+
+    class TestWorkflowTriggerEndpoints:
+        def test_webhook_trigger_payload(self):
+            payload = WebhookTriggerQuery(node_id="node-1")
+            assert payload.node_id == "node-1"
+
+            enable_payload = ParserEnable(trigger_id="trigger-1", enable_trigger=True)
+            assert enable_payload.enable_trigger is True
+
+        def test_webhook_trigger_api_get(
+            self,
+            database_app: Flask,
+            monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+            api = workflow_trigger_module.WebhookTriggerApi()
+            method = unwrap(api.get)
+            trigger = WebhookTriggerRecord(
+                id="trigger-1",
+                node_id="node-1",
+                webhook_id="webhook-1",
+                created_at=datetime(2024, 1, 1),
+            )
+            triggers = MagicMock()
+            triggers.get_webhook.return_value = trigger
+            monkeypatch.setattr(
+                workflow_trigger_module,
+                "application_services",
+                lambda: SimpleNamespace(apps=SimpleNamespace(triggers=triggers)),
+            )
+            context = _make_request_context()
+
+            with database_app.test_request_context("/?node_id=node-1"):
+                result = method(
+                    api,
+                    WebhookTriggerQuery(node_id="node-1"),
+                    context,
+                    app_id=uuid.UUID(_APP_APIS_APP_ID),
+                )
+
+            assert isinstance(result, dict)
+            assert {"id", "webhook_id", "webhook_url", "webhook_debug_url", "node_id", "created_at"} <= set(
+                result.keys()
+            )
+            assert result["webhook_id"] == "webhook-1"
+            triggers.get_webhook.assert_called_once_with(context, _APP_APIS_APP_ID, "node-1")
 
     class TestWrapsEndpoints:
         def test_get_app_model_context(self):
